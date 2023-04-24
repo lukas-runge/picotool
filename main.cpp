@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
+#include "picoboot_connection.h"
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
 #endif
@@ -64,6 +65,13 @@ using std::pair;
 using std::map;
 
 typedef map<enum picoboot_device_result,vector<pair<libusb_device *, libusb_device_handle *>>> device_map;
+
+struct device_entry {
+    enum picoboot_device_result result;
+    libusb_device * device;
+    libusb_device_handle * handle;
+    string serial;
+};
 
 typedef unsigned int uint;
 
@@ -242,8 +250,13 @@ struct cmd {
     virtual string get_doc() const = 0;
     virtual device_support get_device_support() { return one; }
     virtual bool force_requires_pre_reboot() { return true; }
+
     // return true if the command caused a reboot
-    virtual bool execute(device_map& devices) = 0;
+    virtual bool execute_none() { assert(get_device_support() == cmd::none); return false; }
+    virtual bool execute_multiple(vector<device_entry>& devices) { assert(get_device_support() == cmd::zero_or_more); return false; }
+    virtual bool execute_single(device_entry& entry) { assert(get_device_support() == cmd::one); return false; }
+    virtual bool accepts_device(device_entry& entry) { return entry.result == dr_vidpid_bootrom_ok; }
+
     const string& name() { return _name; }
 private:
     string _name;
@@ -255,6 +268,7 @@ struct _settings {
     uint32_t binary_start = FLASH_START;
     int bus=-1;
     int address=-1;
+    string serial;
     uint32_t offset = 0;
     uint32_t from = 0;
     uint32_t to = 0;
@@ -264,6 +278,7 @@ struct _settings {
     bool reboot_app_specified = false;
     bool force = false;
     bool force_no_reboot = false;
+    bool all = false;
 
     struct {
         bool show_basic = false;
@@ -317,7 +332,7 @@ auto file_selection =
 
 struct info_command : public cmd {
     info_command() : cmd("info") {}
-    bool execute(device_map& devices) override;
+    bool execute_multiple(vector<device_entry>& devices) override;
     device_support get_device_support() override {
         if (settings.filename.empty())
             return zero_or_more;
@@ -346,9 +361,26 @@ struct info_command : public cmd {
     }
 };
 
+struct serial_command : public cmd {
+    serial_command() : cmd("serial") {}
+    bool execute_single(device_entry& device) override;
+
+    group get_cli() override {
+        return (
+            (
+                device_selection % "To target one or more connected RP2040 device(s) in BOOTSEL mode (the default)"
+            ).major_group("TARGET SELECTION").min(0).doc_non_optional(true)
+         );
+    }
+
+    string get_doc() const override {
+         return "Display the serial number of the target device in BOOTSEL mode";
+    }
+};
+
 struct verify_command : public cmd {
     verify_command() : cmd("verify") {}
-    bool execute(device_map &devices) override;
+    bool execute_single(device_entry& device) override;
 
     group get_cli() override {
         return (
@@ -371,7 +403,7 @@ struct verify_command : public cmd {
 
 struct save_command : public cmd {
     save_command() : cmd("save") {}
-    bool execute(device_map &devices) override;
+    bool execute_single(device_entry& device) override;
 
     group get_cli() override {
         return (
@@ -397,7 +429,7 @@ struct save_command : public cmd {
 
 struct load_command : public cmd {
     load_command() : cmd("load") {}
-    bool execute(device_map &devices) override;
+    bool execute_single(device_entry& device) override;
 
     group get_cli() override {
         return (
@@ -424,7 +456,7 @@ struct load_command : public cmd {
 
 struct help_command : public cmd {
     help_command() : cmd("help") {}
-    bool execute(device_map &devices) override;
+    bool execute_none() override;
 
     device_support get_device_support() override {
         return device_support::none;
@@ -443,7 +475,7 @@ struct help_command : public cmd {
 
 struct version_command : public cmd {
     version_command() : cmd("version") {}
-    bool execute(device_map &devices) override {
+    bool execute_none() override {
         if (settings.version.semantic)
             std::cout << PICOTOOL_VERSION << "\n";
         else
@@ -469,7 +501,12 @@ struct version_command : public cmd {
 struct reboot_command : public cmd {
     bool quiet;
     reboot_command() : cmd("reboot") {}
-    bool execute(device_map &devices) override;
+    bool execute_single(device_entry& device) override;
+    bool accepts_device(device_entry& device) override {
+        return
+            device.result == dr_vidpid_bootrom_ok ||
+            device.result == dr_vidpid_stdio_usb;
+    }
 
     group get_cli() override {
         return
@@ -495,6 +532,7 @@ struct reboot_command : public cmd {
 
 vector<std::shared_ptr<cmd>> commands {
         std::shared_ptr<cmd>(new info_command()),
+        std::shared_ptr<cmd>(new serial_command()),
         std::shared_ptr<cmd>(new load_command()),
         std::shared_ptr<cmd>(new save_command()),
         std::shared_ptr<cmd>(new verify_command()),
@@ -1605,12 +1643,56 @@ string missing_device_string(bool wasRetry) {
     return b;
 }
 
-bool help_command::execute(device_map &devices) {
+string get_flash_uuid(libusb_device_handle* handle) {
+    picoboot::connection con = picoboot::connection(handle, true);
+    picoboot_memory_access raw_access(con);
+
+    static const uint8_t code_buf[] = {
+        // void flash_get_unique_id(void)
+        0x02, 0xa0, 0x06, 0xa1, 0x00, 0x4a, 0x11, 0xe0, 
+        // int buflen
+        0x0d, 0x00, 0x00, 0x00,
+        // char txbuf[13]
+        0x4b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // char rxbuf[13]
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // void flash_do_cmd(txbuf, rxbuf, buflen)
+        0x80, 0x23, 0xf0, 0xb5, 0x17, 0x4e, 0x9b, 0x00,
+        0x34, 0x68, 0x63, 0x40, 0xc0, 0x24, 0xa4, 0x00,
+        0x23, 0x40, 0x15, 0x4c, 0x23, 0x60, 0xc0, 0x24,
+        0x13, 0x00, 0x64, 0x05, 0x17, 0x00, 0x1f, 0x43,
+        0x06, 0xd1, 0xc0, 0x23, 0x32, 0x68, 0x9b, 0x00,
+        0x93, 0x43, 0x0f, 0x4a, 0x13, 0x60, 0xf0, 0xbd,
+        0x08, 0x25, 0xa7, 0x6a, 0x3d, 0x40, 0xac, 0x46,
+        0x02, 0x25, 0x2f, 0x42, 0x08, 0xd0, 0x00, 0x2a,
+        0x06, 0xd0, 0x9f, 0x1a, 0x0d, 0x2f, 0x03, 0xd8,
+        0x07, 0x78, 0x01, 0x3a, 0x27, 0x66, 0x01, 0x30,
+        0x65, 0x46, 0x00, 0x2d, 0xe2, 0xd0, 0x00, 0x2b,
+        0xe0, 0xd0, 0x27, 0x6e, 0x01, 0x3b, 0x0f, 0x70,
+        0x01, 0x31, 0xdb, 0xe7, 0x0c, 0x80, 0x01, 0x40,
+        0x0c, 0x90, 0x01, 0x40,
+    };
+
+    const uint32_t code_addr = SRAM_START;
+    raw_access.write(code_addr, (uint8_t *)code_buf, sizeof code_buf);
+
+    const uint32_t uid_addr = code_addr + 28 + 1 + 4;
+    uint8_t uid_buf[8];
+
+    con.exec(code_addr | 1);
+
+    raw_access.read(uid_addr, uid_buf, sizeof uid_buf, false);
+    return string(uid_buf, uid_buf + sizeof uid_buf);
+}
+
+bool help_command::execute_none() {
     assert(false);
     return false;
 }
 
-bool info_command::execute(device_map &devices) {
+bool info_command::execute_multiple(vector<device_entry>& devices) {
     fos.first_column(0); fos.hanging_indent(0);
     if (!settings.filename.empty()) {
         auto access = get_file_memory_access();
@@ -1618,30 +1700,54 @@ bool info_command::execute(device_map &devices) {
         info_guts(access);
         return false;
     }
-    int size = devices[dr_vidpid_bootrom_ok].size();
-    if (size) {
-        if (size > 1) {
-            fos << "Multiple RP2040 devices in BOOTSEL mode found:\n";
-        }
-        for (auto handles : devices[dr_vidpid_bootrom_ok]) {
+
+    bool found = false;
+    for (device_entry& entry : devices) {
+        if (entry.result == dr_vidpid_bootrom_ok) {
+            found = true;
+
             fos.first_column(0); fos.hanging_indent(0);
-            if (size > 1) {
-                auto s = bus_device_string(handles.first);
-                string dashes;
-                std::generate_n(std::back_inserter(dashes), s.length() + 1, [] { return '-'; });
-                fos << "\n" << s << ":\n" << dashes << "\n";
-            }
-            picoboot::connection connection(handles.second);
+
+            auto s = bus_device_string(entry.device);
+            string dashes;
+            std::generate_n(std::back_inserter(dashes), s.length() + 1, [] { return '-'; });
+            fos << "\n" << s << ":\n" << dashes << "\n";
+
+            picoboot::connection connection(entry.handle);
             picoboot_memory_access access(connection);
             info_guts(access);
+        } else {
+            // TODO: handle non-ok devices properly
+            auto s = bus_device_string(entry.device);
+            string dashes;
+            std::generate_n(std::back_inserter(dashes), s.length() + 1, [] { return '-'; });
+            fos << "\n" << s << ":\n" << dashes << "\n";
         }
-    } else {
-        fail(ERROR_NO_DEVICE, missing_device_string(false));
     }
+
+    if (!found) {
+        // TODO: handle no devices properly
+        fos << "no devices found...\n";
+    }
+
     return false;
 }
 
-static picoboot::connection get_single_bootsel_device_connection(device_map& devices, bool exclusive = true) {
+static picoboot::connection get_single_bootsel_device_connection(device_map& devices, bool exclusive = true);
+
+void print_hex(uint8_t * buf, size_t len) {
+    for (int i = 0; i < len; i++) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << std::uppercase << int(buf[i]);
+    }
+}
+
+bool serial_command::execute_single(device_entry& device) {
+    string serial = get_flash_uuid(device.handle);
+    std::cout << serial << "\n";
+    return false;
+}
+
+static picoboot::connection get_single_bootsel_device_connection(device_map& devices, bool exclusive) {
     assert(devices[dr_vidpid_bootrom_ok].size() == 1);
     libusb_device_handle *rc = devices[dr_vidpid_bootrom_ok][0].second;
     if (!rc) fail(ERROR_USB, "Unable to connect to device");
@@ -1674,8 +1780,8 @@ struct progress_bar {
     int width;
 };
 
-bool save_command::execute(device_map &devices) {
-    auto con = get_single_bootsel_device_connection(devices);
+bool save_command::execute_single(device_entry& device) {
+    picoboot::connection con = picoboot::connection(device.handle, true);
     picoboot_memory_access raw_access(con);
 
     uint32_t end = 0;
@@ -1818,12 +1924,12 @@ vector<range> get_coalesced_ranges(file_memory_access &file_access) {
     return ranges;
 }
 
-bool load_command::execute(device_map &devices) {
+bool load_command::execute_single(device_entry& device) {
     if (settings.offset_set && get_file_type() != filetype::bin) {
         fail(ERROR_ARGS, "Offset only valid for BIN files");
     }
     auto file_access = get_file_memory_access();
-    auto con = get_single_bootsel_device_connection(devices);
+    picoboot::connection con = picoboot::connection(device.handle, true);
     picoboot_memory_access raw_access(con);
     range flash_binary_range(FLASH_START, FLASH_END);
     bool flash_binary_end_unknown = true;
@@ -1958,12 +2064,12 @@ bool load_command::execute(device_map &devices) {
     return false;
 }
 
-bool verify_command::execute(device_map &devices) {
+bool verify_command::execute_single(device_entry& device) {
     if (settings.offset_set && get_file_type() != filetype::bin) {
         fail(ERROR_ARGS, "Offset only valid for BIN files");
     }
     auto file_access = get_file_memory_access();
-    auto con = get_single_bootsel_device_connection(devices);
+    picoboot::connection con = picoboot::connection(device.handle);
     picoboot_memory_access raw_access(con);
     auto ranges = get_coalesced_ranges(file_access);
     if (settings.range_set) {
@@ -2107,9 +2213,9 @@ static int reboot_device(libusb_device *device, bool bootsel, uint disable_mask=
     fail(ERROR_USB, "Unable to locate reset interface on the device");
 }
 
-bool reboot_command::execute(device_map &devices) {
+bool reboot_command::execute_single(device_entry& entry) {
     if (settings.force) {
-        reboot_device(devices[dr_vidpid_stdio_usb][0].first, settings.reboot_usb);
+        reboot_device(entry.device, settings.reboot_usb);
         if (!quiet) {
             if (settings.reboot_usb) {
                 std::cout << "The device was asked to reboot into BOOTSEL mode.\n";
@@ -2117,10 +2223,10 @@ bool reboot_command::execute(device_map &devices) {
                 std::cout << "The device was asked to reboot into application mode.\n";
             }
         }
-    } else {
+    } else if (entry.handle != nullptr) {
         // not exclusive, because restoring un-exclusive could fail; also if we're rebooting, we don't much
         // care what else is happening.
-        auto con = get_single_bootsel_device_connection(devices, false);
+        picoboot::connection con = picoboot::connection(entry.handle, false);
         if (!settings.reboot_usb) {
             con.reboot(0, SRAM_END, 500);
         } else {
@@ -2179,9 +2285,100 @@ void cancelled(int) {
     throw cancelled_exception();
 }
 
-int main(int argc, char **argv) {
-    libusb_context *ctx = nullptr;
+void enumerate_devices(vector<device_entry>& device_entries, libusb_context* ctx) {
+    struct libusb_device** devs = nullptr;
+    if (libusb_get_device_list(ctx, &devs) < 0) {
+        fail(ERROR_USB, "Failed to enumerate USB devices\n");
+    }
 
+    for (libusb_device** dev = devs; *dev; dev++) {
+        // skip enumerating other devices if we are selecting by bus number / address
+        if (settings.bus != -1 && settings.bus != libusb_get_bus_number(*dev)) continue;
+        if (settings.address != -1 && settings.address != libusb_get_device_address(*dev)) continue;
+
+        libusb_device_handle* handle = nullptr;
+        enum picoboot_device_result result = picoboot_open_device(*dev, &handle);
+        if (result == dr_error || result == dr_vidpid_unknown) {
+            if (handle != nullptr) libusb_close(handle);
+            continue;
+        }
+
+        string serial;
+        if (
+            handle == nullptr &&
+            result != dr_vidpid_bootrom_ok &&
+            result != dr_vidpid_bootrom_cant_connect &&
+            result != dr_vidpid_bootrom_no_interface
+        ) {
+            // device is not in BOOTSEL mode
+            // read its serial number directly from the usb descriptor
+
+            libusb_device_descriptor desc;
+            if (libusb_get_device_descriptor(*dev, &desc) < 0) {
+                // FIXME: report failure
+                continue;
+            }
+
+            serial.resize(256);
+            int ret = libusb_get_string_descriptor_ascii(handle, desc.iSerialNumber, (uint8_t*)&serial.front(), serial.size());
+            if (ret < 0) {
+                // FIXME: report failure
+                continue;
+            }
+
+            serial.resize(ret);
+        } else if (handle != nullptr) {
+            // device is in BOOTSEL mode
+            // read its serial number from flash
+
+            serial = get_flash_uuid(handle);
+        }
+
+        if (!settings.serial.empty() && serial != settings.serial) continue;
+
+        libusb_ref_device(*dev);
+        device_entries.push_back(device_entry {
+            .result = result,
+            .device = *dev,
+            .handle = handle,
+            .serial = serial,
+        });
+    }
+
+    libusb_free_device_list(devs, 1);
+}
+
+void free_devices(vector<device_entry>& device_entries) {
+    for (device_entry& entry : device_entries) {
+        libusb_close(entry.handle);
+        libusb_unref_device(entry.device);
+    }
+
+    device_entries.clear();
+}
+
+void force_devices_into_bootrom(vector<device_entry>& device_entries, libusb_context* ctx) {
+    for (device_entry& entry : device_entries) {
+        if (entry.result == dr_vidpid_stdio_usb) {
+            reboot_device(entry.device, true, 1);
+        }
+    }
+
+    free_devices(device_entries);
+    enumerate_devices(device_entries, ctx);
+}
+
+void force_devices_into_application(vector<device_entry>& device_entries) {
+    for (device_entry& entry : device_entries) {
+        if (entry.result == dr_vidpid_bootrom_ok) {
+            reboot_device(entry.device, false, 1);
+        }
+    }
+
+    free_devices(device_entries);
+}
+
+int main(int argc, char **argv) {
     int tw=0, th=0;
     get_terminal_size(tw, th);
     if (tw) {
@@ -2197,177 +2394,93 @@ int main(int argc, char **argv) {
     // save complicating the grammar
     if (settings.force_no_reboot) settings.force = true;
 
-    struct libusb_device **devs = nullptr;
-    device_map devices;
-    vector<libusb_device_handle *> to_close;
+    if (settings.reboot_usb && settings.reboot_app_specified) {
+        fail(ERROR_ARGS, "Cannot specify both -u and -a reboot options");
+    }
+
+    int exit_code = 0;
+    libusb_context* ctx = nullptr;
+    vector<device_entry> device_entries;
 
     try {
         signal(SIGINT, cancelled);
         signal(SIGTERM, cancelled);
 
-        if (settings.reboot_usb && settings.reboot_app_specified) {
-            fail(ERROR_ARGS, "Cannot specify both -u and -a reboot options");
+        enum cmd::device_support dev_support = selected_cmd->get_device_support();
+        if (dev_support == cmd::none) {
+            selected_cmd->execute_none();
+            return 0;
         }
 
-        if (selected_cmd->get_device_support() != cmd::none) {
-            if (libusb_init(&ctx)) {
-                fail(ERROR_USB, "Failed to initialise libUSB\n");
+        if (libusb_init(&ctx) < 0) {
+            fail(ERROR_USB, "Failed to initialise libUSB\n");
+        }
+
+        // enumerate devices
+        enumerate_devices(device_entries, ctx);
+        size_t num_devices = device_entries.size();
+
+        // bail if device(s) not acceptable to command
+        if (dev_support == cmd::one && num_devices == 0) {
+            // TODO: missing device string
+            fail(ERROR_NO_DEVICE, "no device");
+        } else if (dev_support == cmd::one && !settings.all && num_devices > 1) {
+            // TODO: better error message
+            fail(ERROR_NOT_POSSIBLE, "too many devices");
+        }
+
+        // reboot devices into bootloader mode if forced
+        bool was_force = settings.force;
+        if (settings.force && selected_cmd->force_requires_pre_reboot()) {
+            force_devices_into_bootrom(device_entries, ctx);
+            num_devices = device_entries.size();
+            settings.force = false;
+
+            // bail if devices now not acceptable to command
+            if (dev_support == cmd::one && num_devices == 0) {
+                // TODO: missing device string
+                fail(ERROR_NO_DEVICE, "no device after force reboot");
+            } else if (dev_support == cmd::one && !settings.all && num_devices > 1) {
+                // TODO: better error message
+                fail(ERROR_NOT_POSSIBLE, "too many devices after force reboot");
             }
         }
 
-        // we only loop a second time if we want to reboot some devices (which may cause device
-        for (int tries = 0; !rc && tries < 2; tries++) {
-            if (ctx) {
-                if (libusb_get_device_list(ctx, &devs) < 0) {
-                    fail(ERROR_USB, "Failed to enumerate USB devices\n");
+        // execute command on one or multiple devices
+        bool was_rebooted = false;
+        if (dev_support == cmd::zero_or_more) {
+            was_rebooted = selected_cmd->execute_multiple(device_entries);
+        } else {
+            for (device_entry& entry : device_entries) {
+                if (selected_cmd->accepts_device(entry)) {
+                    was_rebooted |= selected_cmd->execute_single(entry);
                 }
-                for (libusb_device **dev = devs; *dev; dev++) {
-                    if (settings.bus != -1 && settings.bus != libusb_get_bus_number(*dev)) continue;
-                    if (settings.address != -1 && settings.address != libusb_get_device_address(*dev)) continue;
-                    libusb_device_handle *handle = nullptr;
-                    auto result = picoboot_open_device(*dev, &handle);
-                    if (handle) {
-                        to_close.push_back(handle);
-                    }
-                    if (result != dr_error) {
-                        devices[result].push_back(std::make_pair(*dev, handle));
-                    }
-                }
-            }
-            auto supported = selected_cmd->get_device_support();
-            switch (supported) {
-                case cmd::device_support::zero_or_more:
-                    if (!settings.filename.empty()) break;
-                    // fall thru
-                case cmd::device_support::one:
-                    if (devices[dr_vidpid_bootrom_ok].empty() &&
-                        (!settings.force || devices[dr_vidpid_stdio_usb].empty())) {
-                        bool had_note = false;
-                        fos << missing_device_string(tries>0);
-                        if (tries > 0) {
-                            fos << " It is possible the device is not responding, and will have to be manually entered into BOOTSEL mode.\n";
-                            had_note = true; // suppress "but:" in this case
-                        }
-                        fos << "\n";
-                        fos.first_column(0);
-                        fos.hanging_indent(4);
-                        auto printer = [&](enum picoboot_device_result r, const string &description) {
-                            if (!had_note && !devices[r].empty()) {
-                                fos << "\nbut:\n\n";
-                                had_note = true;
-                            }
-                            for (auto d : devices[r]) {
-                                fos << bus_device_string(d.first) << description << "\n";
-                            }
-                        };
-#if defined(__linux__) || defined(__APPLE__)
-                        printer(dr_vidpid_bootrom_cant_connect,
-                                " appears to be a RP2040 device in BOOTSEL mode, but picotool was unable to connect. Maybe try 'sudo' or check your permissions.");
-#else
-                        printer(dr_vidpid_bootrom_cant_connect,
-                                " appears to be a RP2040 device in BOOTSEL mode, but picotool was unable to connect. You may need to install a driver. See \"Getting started with Raspberry Pi Pico\" for more information");
-#endif
-                        printer(dr_vidpid_picoprobe,
-                                " appears to be a RP2040 PicoProbe device not in BOOTSEL mode.");
-                        printer(dr_vidpid_micropython,
-                                " appears to be a RP2040 MicroPython device not in BOOTSEL mode.");
-                        if (selected_cmd->force_requires_pre_reboot()) {
-#if defined(_WIN32)
-                            printer(dr_vidpid_stdio_usb,
-                                    " appears to be a RP2040 device with a USB serial connection, not in BOOTSEL mode. You can force reboot into BOOTSEL mode via 'picotool reboot -f -u' first.");
-#else
-                            printer(dr_vidpid_stdio_usb,
-                                    " appears to be a RP2040 device with a USB serial connection, so consider -f (or -F) to force reboot in order to run the command.");
-#endif
-                        } else {
-                            // special case message for what is actually just reboot (the only command that doesn't require reboot first)
-                            printer(dr_vidpid_stdio_usb,
-                                    " appears to be a RP2040 device with a USB serial connection, so consider -f to force the reboot.");
-                        }
-                        rc = ERROR_NO_DEVICE;
-                    } else if (supported == cmd::device_support::one) {
-                        if (devices[dr_vidpid_bootrom_ok].size() > 1 ||
-                            (devices[dr_vidpid_bootrom_ok].empty() && devices[dr_vidpid_stdio_usb].size() > 1)) {
-                            fail(ERROR_NOT_POSSIBLE, "Command requires a single RP2040 device to be targeted.");
-                        }
-                        if (!devices[dr_vidpid_bootrom_ok].empty()) {
-                            settings.force = false; // we have a device, so we're not forcing
-                        }
-                    } else if (supported == cmd::device_support::zero_or_more && settings.force && !devices[dr_vidpid_bootrom_ok].empty()) {
-                        // we have usable devices, so lets use them without force
-                        settings.force = false;
-                    }
-                    fos.first_column(0);
-                    fos.hanging_indent(0);
-                    break;
-                default:
-                    break;
-            }
-            if (!rc) {
-                if (settings.force && ctx) { // actually ctx should never be null as we are targeting device if force is set, but still
-                    if (devices[dr_vidpid_stdio_usb].size() != 1) {
-                        fail(ERROR_NOT_POSSIBLE,
-                             "Forced command requires a single rebootable RP2040 device to be targeted.");
-                    }
-                    if (selected_cmd->force_requires_pre_reboot()) {
-                        // we reboot into BOOTSEL mode and disable MSC interface (the 1 here)
-                        auto &to_reboot = devices[dr_vidpid_stdio_usb][0].first;
-                        reboot_device(to_reboot, true, 1);
-                        fos << "The device was asked to reboot into BOOTSEL mode so the command can be executed.\n\n";
-                        for (const auto &handle : to_close) {
-                            libusb_close(handle);
-                        }
-                        libusb_free_device_list(devs, 1);
-                        devs = nullptr;
-                        to_close.clear();
-                        devices.clear();
-                        sleep_ms(1200);
-
-                        // we now clear settings.force, because we expect the device to have rebooted and be available.
-                        // we also clear any filters, because the device may have moved, so the only way we can find it
-                        // again is to assume it is the only now visible device.
-                        settings.force = false;
-                        settings.address = -1;
-                        settings.bus = -1;
-                        continue;
-                    }
-                }
-                if (!selected_cmd->execute(devices) && tries) {
-                    if (settings.force_no_reboot) {
-                        fos << "\nThe device has been left accessible, but without the drive mounted; use 'picotool reboot' to reboot into regular BOOTSEL mode or application mode.\n";
-                    } else {
-                        // can only really do this with one device
-                        if (devices[dr_vidpid_bootrom_ok].size() == 1) {
-                            reboot_cmd.quiet = true;
-                            reboot_cmd.execute(devices);
-                            fos << "\nThe device was asked to reboot back into application mode.\n";
-                        }
-                    }
-                }
-                break;
             }
         }
+
+        // reboot devices back into application mode if forced
+        if (!was_rebooted && was_force && !settings.force_no_reboot && selected_cmd->force_requires_pre_reboot()) {
+            force_devices_into_application(device_entries);
+        }
+
     } catch (command_failure &e) {
         std::cout << "ERROR: " << e.what() << "\n";
-        rc = e.code();
+        exit_code = e.code();
     } catch (picoboot::command_failure& e) {
         std::cout << "ERROR: The RP2040 device returned an error: " << e.what() << "\n";
-        rc = ERROR_UNKNOWN;
+        exit_code = ERROR_UNKNOWN;
     } catch (picoboot::connection_error&) {
         std::cout << "ERROR: Communication with RP2040 device failed\n";
-        rc = ERROR_CONNECTION;
+        exit_code = ERROR_CONNECTION;
     } catch (cancelled_exception&) {
-        rc = ERROR_CANCELLED;
+        exit_code = ERROR_CANCELLED;
     } catch (std::exception &e) {
         std::cout << "ERROR: " << e.what() << "\n";
-        rc = ERROR_UNKNOWN;
+        exit_code = ERROR_UNKNOWN;
     }
 
-    for(const auto &handle : to_close) {
-        libusb_close(handle);
-    }
-    if (devs) libusb_free_device_list(devs, 1);
-    if (ctx) libusb_exit(ctx);
+    free_devices(device_entries);
+    if (ctx != nullptr) libusb_exit(ctx);
 
-    return rc;
+    return exit_code;
 }
