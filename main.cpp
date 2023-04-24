@@ -312,7 +312,8 @@ auto device_selection =
         (option("--bus") & integer("bus").min_value(0).max_value(255).set(settings.bus)
             .if_missing([] { return "missing bus number"; })) % "Filter devices by USB bus number" +
         (option("--address") & integer("addr").min_value(1).max_value(127).set(settings.address)
-            .if_missing([] { return "missing address"; })) % "Filter devices by USB device address"
+            .if_missing([] { return "missing address"; })) % "Filter devices by USB device address" +
+        option("--serial").set(settings.serial) % "Filter devices by serial number"
 #if !defined(_WIN32)
         + option('f', "--force").set(settings.force) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be rebooted back to application mode" +
                 option('F', "--force-no-reboot").set(settings.force_no_reboot) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be left connected and accessible to picotool, but without the RPI-RP2 drive mounted"
@@ -2305,7 +2306,6 @@ void enumerate_devices(vector<device_entry>& device_entries, libusb_context* ctx
 
         string serial;
         if (
-            handle == nullptr &&
             result != dr_vidpid_bootrom_ok &&
             result != dr_vidpid_bootrom_cant_connect &&
             result != dr_vidpid_bootrom_no_interface
@@ -2319,8 +2319,15 @@ void enumerate_devices(vector<device_entry>& device_entries, libusb_context* ctx
                 continue;
             }
 
+            libusb_device_handle * desc_handle = nullptr;
+            if (libusb_open(*dev, &desc_handle) < 0) {
+                // FIXME: report failure
+                continue;
+            }
+
             serial.resize(256);
-            int ret = libusb_get_string_descriptor_ascii(handle, desc.iSerialNumber, (uint8_t*)&serial.front(), serial.size());
+            int ret = libusb_get_string_descriptor_ascii(desc_handle, desc.iSerialNumber, (uint8_t*)&serial.front(), serial.size());
+            libusb_close(desc_handle);
             if (ret < 0) {
                 // FIXME: report failure
                 continue;
