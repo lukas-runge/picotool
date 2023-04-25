@@ -313,15 +313,16 @@ auto device_selection = (
             .if_missing([] { return "missing bus number"; })) % "Filter devices by USB bus number" +
         (option("--address") & integer("addr").min_value(1).max_value(127).set(settings.address)
             .if_missing([] { return "missing address"; })) % "Filter devices by USB device address"
-    ).min(0).doc_non_optional(true)
-    + (option("--serial") & value("serial").set(settings.serial)
-        .if_missing([] { return "missing serial"; })) % "Filter devices by serial number"
+    ).min(0).doc_non_optional(true) +
+    (
+        (option("--serial") & value("serial").set(settings.serial)) % "Filter devices by serial number"
 #if !defined(_WIN32)
-    + option('f', "--force").set(settings.force) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be rebooted back to application mode"
-    + option('F', "--force-no-reboot").set(settings.force_no_reboot) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be left connected and accessible to picotool, but without the RPI-RP2 drive mounted"
+        + option('f', "--force").set(settings.force) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be rebooted back to application mode"
+        + option('F', "--force-no-reboot").set(settings.force_no_reboot) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be left connected and accessible to picotool, but without the RPI-RP2 drive mounted"
 #endif
-    + option("--multiple").set(settings.multiple) % "Apply to multiple devices "
-);
+        + option("--multiple").set(settings.multiple) % "Apply to multiple devices "
+    ).min(0).doc_non_optional(true)
+).min(0);
 
 auto file_types = (option ('t', "--type") & value("type").set(settings.file_type))
             % "Specify file type (uf2 | elf | bin) explicitly, ignoring file extension";
@@ -1714,9 +1715,8 @@ bool info_command::execute_multiple(vector<device_entry>& devices) {
 
     bool found = false;
     for (device_entry& entry : devices) {
+        found = true;
         if (entry.result == dr_vidpid_bootrom_ok) {
-            found = true;
-
             fos.first_column(0); fos.hanging_indent(0);
 
             auto s = bus_device_string(entry.device) + ", with serial " + entry.serial;
@@ -1735,6 +1735,36 @@ bool info_command::execute_multiple(vector<device_entry>& devices) {
             string dashes;
             std::generate_n(std::back_inserter(dashes), s.length() + 1, [] { return '-'; });
             fos << "\n" << s << ":\n" << dashes << "\n";
+
+            switch (entry.result) {
+                case dr_vidpid_bootrom_cant_connect:
+                case dr_vidpid_bootrom_no_interface:
+#if defined(__linux__) || defined(__APPLE__)
+                    fos << "appears to be a RP2040 device in BOOTSEL mode, but picotool was unable to connect. Maybe try 'sudo' or check your permissions\n";
+#else
+                    fos << "appears to be a RP2040 device in BOOTSEL mode, but picotool was unable to connect. You may need to install a driver. See \"Getting started with Raspberry Pi Pico\" for more information\n";
+#endif
+                    break;
+                case dr_vidpid_picoprobe:
+                    fos << "appears to be a RP2040 PicoProbe device not in BOOTSEL mode.\n";
+                    break;
+                case dr_vidpid_micropython:
+                    fos << "appears to be a RP2040 MicroPython device not in BOOTSEL mode.\n";
+                    break;
+                case dr_vidpid_stdio_usb:
+#if defined(_WIN32)
+                        fos << "appears to be a RP2040 device with a USB serial connection not in BOOTSEL mode.\n";
+#else
+                    if (selected_cmd->force_requires_pre_reboot()) {
+                        fos << "appears to be a RP2040 device with a USB serial connection not in BOOTSEL mode, so consider -f (or -F) to force reboot in order to run the command.\n";
+                    } else {
+                        fos << "appears to be a RP2040 device with a USB serial connection not in BOOTSEL mode, so consider -f (or -F) to force the reboot.\n";
+                    }
+#endif
+                    break;
+                default:
+                    fos << "appears to be an unknown type of device\n";
+            }
         }
     }
 
