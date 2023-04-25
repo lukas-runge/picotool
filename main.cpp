@@ -1728,7 +1728,6 @@ bool info_command::execute_multiple(vector<device_entry>& devices) {
             picoboot_memory_access access(connection);
             info_guts(access);
         } else {
-            // TODO: handle non-ok devices properly
             fos.first_column(0); fos.hanging_indent(0);
 
             auto s = bus_device_string(entry.device) + ", with serial " + entry.serial;
