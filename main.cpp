@@ -2414,9 +2414,15 @@ void force_devices_into_bootrom(vector<device_entry>& device_entries, libusb_con
         }
     }
 
-    sleep(1);
+    // TODO: HACK, hopefully that is enough sleep
+    sleep(2);
 
     if (rebooted) {
+        // invalidate USB bus/address filters after a reboot
+        // those would not stay valid anyway
+        settings.bus = -1;
+        settings.address = -1;
+
         free_devices(device_entries);
         enumerate_devices(device_entries, ctx);
     }
