@@ -2406,14 +2406,20 @@ void free_devices(vector<device_entry>& device_entries) {
 }
 
 void force_devices_into_bootrom(vector<device_entry>& device_entries, libusb_context* ctx) {
+    bool rebooted = false;
     for (device_entry& entry : device_entries) {
         if (entry.result == dr_vidpid_stdio_usb) {
+            rebooted = true;
             reboot_device(entry.device, true, 1);
         }
     }
 
-    free_devices(device_entries);
-    enumerate_devices(device_entries, ctx);
+    sleep(1);
+
+    if (rebooted) {
+        free_devices(device_entries);
+        enumerate_devices(device_entries, ctx);
+    }
 }
 
 void force_devices_into_application(vector<device_entry>& device_entries) {
