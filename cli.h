@@ -709,7 +709,7 @@ namespace cli {
                         } else {
                             if (ms.get_match_count(elements[i]) < elements[i]->min()) {
                                 if (final_pass) {
-                                    ms.error_message = elements[i]->missing ? elements[i]->missing() : "missing required argument";
+                                    ms.error_message = elements[i]->missing ? elements[i]->missing() : ("missing required argument '" + elements[i]->name() + "'");
                                     return match_type::error;
                                 }
                                 not_min_this_time = true;

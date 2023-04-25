@@ -278,7 +278,7 @@ struct _settings {
     bool reboot_app_specified = false;
     bool force = false;
     bool force_no_reboot = false;
-    bool all = false;
+    bool multiple = false;
 
     struct {
         bool show_basic = false;
@@ -307,18 +307,21 @@ struct _settings {
 _settings settings;
 std::shared_ptr<cmd> selected_cmd;
 
-auto device_selection =
+auto device_selection = (
     (
         (option("--bus") & integer("bus").min_value(0).max_value(255).set(settings.bus)
             .if_missing([] { return "missing bus number"; })) % "Filter devices by USB bus number" +
         (option("--address") & integer("addr").min_value(1).max_value(127).set(settings.address)
-            .if_missing([] { return "missing address"; })) % "Filter devices by USB device address" +
-        option("--serial").set(settings.serial) % "Filter devices by serial number"
+            .if_missing([] { return "missing address"; })) % "Filter devices by USB device address"
+    ).min(0).doc_non_optional(true)
+    + (option("--serial") & value("serial").set(settings.serial)
+        .if_missing([] { return "missing serial"; })) % "Filter devices by serial number"
 #if !defined(_WIN32)
-        + option('f', "--force").set(settings.force) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be rebooted back to application mode" +
-                option('F', "--force-no-reboot").set(settings.force_no_reboot) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be left connected and accessible to picotool, but without the RPI-RP2 drive mounted"
+    + option('f', "--force").set(settings.force) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be rebooted back to application mode"
+    + option('F', "--force-no-reboot").set(settings.force_no_reboot) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be left connected and accessible to picotool, but without the RPI-RP2 drive mounted"
 #endif
-    ).min(0).doc_non_optional(true);
+    + option("--multiple").set(settings.multiple) % "Apply to multiple devices "
+);
 
 auto file_types = (option ('t', "--type") & value("type").set(settings.file_type))
             % "Specify file type (uf2 | elf | bin) explicitly, ignoring file extension";
@@ -1682,10 +1685,17 @@ string get_flash_uuid(libusb_device_handle* handle) {
     const uint32_t uid_addr = code_addr + 28 + 1 + 4;
     uint8_t uid_buf[8];
 
+    con.exit_xip();
     con.exec(code_addr | 1);
+    con.enter_cmd_xip();
 
     raw_access.read(uid_addr, uid_buf, sizeof uid_buf, false);
-    return string(uid_buf, uid_buf + sizeof uid_buf);
+
+    std::stringstream ss;
+    for (uint8_t byte : uid_buf) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << std::uppercase << int(byte);
+    }
+    return ss.str();
 }
 
 bool help_command::execute_none() {
@@ -1709,7 +1719,7 @@ bool info_command::execute_multiple(vector<device_entry>& devices) {
 
             fos.first_column(0); fos.hanging_indent(0);
 
-            auto s = bus_device_string(entry.device);
+            auto s = bus_device_string(entry.device) + ", with serial " + entry.serial;
             string dashes;
             std::generate_n(std::back_inserter(dashes), s.length() + 1, [] { return '-'; });
             fos << "\n" << s << ":\n" << dashes << "\n";
@@ -1719,7 +1729,9 @@ bool info_command::execute_multiple(vector<device_entry>& devices) {
             info_guts(access);
         } else {
             // TODO: handle non-ok devices properly
-            auto s = bus_device_string(entry.device);
+            fos.first_column(0); fos.hanging_indent(0);
+
+            auto s = bus_device_string(entry.device) + ", with serial " + entry.serial;
             string dashes;
             std::generate_n(std::back_inserter(dashes), s.length() + 1, [] { return '-'; });
             fos << "\n" << s << ":\n" << dashes << "\n";
@@ -2431,7 +2443,7 @@ int main(int argc, char **argv) {
         if (dev_support == cmd::one && num_devices == 0) {
             // TODO: missing device string
             fail(ERROR_NO_DEVICE, "no device");
-        } else if (dev_support == cmd::one && !settings.all && num_devices > 1) {
+        } else if (dev_support == cmd::one && !settings.multiple && num_devices > 1) {
             // TODO: better error message
             fail(ERROR_NOT_POSSIBLE, "too many devices");
         }
@@ -2447,7 +2459,7 @@ int main(int argc, char **argv) {
             if (dev_support == cmd::one && num_devices == 0) {
                 // TODO: missing device string
                 fail(ERROR_NO_DEVICE, "no device after force reboot");
-            } else if (dev_support == cmd::one && !settings.all && num_devices > 1) {
+            } else if (dev_support == cmd::one && !settings.multiple && num_devices > 1) {
                 // TODO: better error message
                 fail(ERROR_NOT_POSSIBLE, "too many devices after force reboot");
             }
