@@ -279,6 +279,7 @@ struct _settings {
     bool force = false;
     bool force_no_reboot = false;
     bool multiple = false;
+    bool verbose = false;
 
     struct {
         bool show_basic = false;
@@ -320,7 +321,8 @@ auto device_selection = (
         + option('f', "--force").set(settings.force) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be rebooted back to application mode"
         + option('F', "--force-no-reboot").set(settings.force_no_reboot) % "Force a device not in BOOTSEL mode but running compatible code to reset so the command can be executed. After executing the command (unless the command itself is a 'reboot') the device will be left connected and accessible to picotool, but without the RPI-RP2 drive mounted"
 #endif
-        + option("--multiple").set(settings.multiple) % "Apply to multiple devices "
+        + option("--multiple").set(settings.multiple) % "Apply to multiple devices"
+        + option("--verbose").set(settings.verbose) % "Print extra debug information"
     ).min(0).doc_non_optional(true)
 ).min(0);
 
@@ -2328,6 +2330,8 @@ void cancelled(int) {
 }
 
 void enumerate_devices(vector<device_entry>& device_entries, libusb_context* ctx) {
+    if (settings.verbose) std::cout << "[verbose] enumerating devices\n";
+
     struct libusb_device** devs = nullptr;
     if (libusb_get_device_list(ctx, &devs) < 0) {
         fail(ERROR_USB, "Failed to enumerate USB devices\n");
@@ -2394,9 +2398,12 @@ void enumerate_devices(vector<device_entry>& device_entries, libusb_context* ctx
     }
 
     libusb_free_device_list(devs, 1);
+    if (settings.verbose) std::cout << "[verbose] found " << device_entries.size() << " relevant devices\n";
 }
 
 void free_devices(vector<device_entry>& device_entries) {
+    if (settings.verbose) std::cout << "[verbose] freeing device list\n";
+
     for (device_entry& entry : device_entries) {
         libusb_close(entry.handle);
         libusb_unref_device(entry.device);
@@ -2405,12 +2412,15 @@ void free_devices(vector<device_entry>& device_entries) {
     device_entries.clear();
 }
 
-void force_devices_into_bootrom(vector<device_entry>& device_entries, libusb_context* ctx) {
+void force_devices_into_bootloader(vector<device_entry>& device_entries, libusb_context* ctx) {
+    if (settings.verbose) std::cout << "[verbose] forcing devices into BOOTSEL mode\n";
+
     bool rebooted = false;
     for (device_entry& entry : device_entries) {
         if (entry.result == dr_vidpid_stdio_usb) {
-            rebooted = true;
+            if (settings.verbose) std::cout << "[verbose] rebooting device with serial '" << entry.serial << "'\n";
             reboot_device(entry.device, true, 1);
+            rebooted = true;
         }
     }
 
@@ -2423,14 +2433,18 @@ void force_devices_into_bootrom(vector<device_entry>& device_entries, libusb_con
         settings.bus = -1;
         settings.address = -1;
 
+        if (settings.verbose) std::cout << "[verbose] reenumerating devices after reboot\n";
         free_devices(device_entries);
         enumerate_devices(device_entries, ctx);
     }
 }
 
 void force_devices_into_application(vector<device_entry>& device_entries) {
+    if (settings.verbose) std::cout << "[verbose] forcing devices back into application mode\n";
+
     for (device_entry& entry : device_entries) {
         if (entry.result == dr_vidpid_bootrom_ok) {
+            if (settings.verbose) std::cout << "[verbose] rebooting device with serial '" << entry.serial << "'\n";
             reboot_device(entry.device, false, 1);
         }
     }
@@ -2468,6 +2482,7 @@ int main(int argc, char **argv) {
 
         enum cmd::device_support dev_support = selected_cmd->get_device_support();
         if (dev_support == cmd::none) {
+            if (settings.verbose) std::cout << "[verbose] running command '" << selected_cmd->name() << "' with no devices\n";
             selected_cmd->execute_none();
             return 0;
         }
@@ -2492,7 +2507,7 @@ int main(int argc, char **argv) {
         // reboot devices into bootloader mode if forced
         bool was_force = settings.force;
         if (settings.force && selected_cmd->force_requires_pre_reboot()) {
-            force_devices_into_bootrom(device_entries, ctx);
+            force_devices_into_bootloader(device_entries, ctx);
             num_devices = device_entries.size();
             settings.force = false;
 
@@ -2509,10 +2524,12 @@ int main(int argc, char **argv) {
         // execute command on one or multiple devices
         bool was_rebooted = false;
         if (dev_support == cmd::zero_or_more) {
+            if (settings.verbose) std::cout << "[verbose] running command '" << selected_cmd->name() << "' with multiple devices\n";
             was_rebooted = selected_cmd->execute_multiple(device_entries);
         } else {
             for (device_entry& entry : device_entries) {
                 if (selected_cmd->accepts_device(entry)) {
+                    if (settings.verbose) std::cout << "[verbose] running command '" << selected_cmd->name() << "' with device with serial '" << entry.serial << "'\n";
                     was_rebooted |= selected_cmd->execute_single(entry);
                 }
             }
