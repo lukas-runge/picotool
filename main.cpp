@@ -2419,7 +2419,7 @@ void force_devices_into_bootloader(vector<device_entry>& device_entries, libusb_
     bool rebooted = false;
     for (device_entry& entry : device_entries) {
         if (entry.result == dr_vidpid_stdio_usb) {
-            std::cout << "[info] rebooting device with serial '" << entry.serial << " into BOOTSEL mode'\n";
+            std::cout << "[info] rebooting device with serial '" << entry.serial << "' into BOOTSEL mode\n";
             reboot_device(entry.device, true, 1);
             rebooted = true;
         }
@@ -2443,9 +2443,10 @@ void force_devices_into_bootloader(vector<device_entry>& device_entries, libusb_
 void force_devices_into_application(vector<device_entry>& device_entries) {
     if (settings.verbose) std::cout << "[verbose] forcing devices back into application mode\n";
 
+
     for (device_entry& entry : device_entries) {
         if (entry.result == dr_vidpid_bootrom_ok) {
-            std::cout << "[info] rebooting device with serial '" << entry.serial << " back into application mode'\n";
+            std::cout << "[info] rebooting device with serial '" << entry.serial << "' back into application mode\n";
             reboot_cmd.execute_single(entry);
         }
     }
