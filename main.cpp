@@ -2402,6 +2402,7 @@ void enumerate_devices(vector<device_entry>& device_entries, libusb_context* ctx
 }
 
 void free_devices(vector<device_entry>& device_entries) {
+    if (device_entries.empty()) return;
     if (settings.verbose) std::cout << "[verbose] freeing device list\n";
 
     for (device_entry& entry : device_entries) {
