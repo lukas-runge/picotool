@@ -2445,7 +2445,7 @@ void force_devices_into_application(vector<device_entry>& device_entries) {
     for (device_entry& entry : device_entries) {
         if (entry.result == dr_vidpid_bootrom_ok) {
             if (settings.verbose) std::cout << "[verbose] rebooting device with serial '" << entry.serial << "'\n";
-            reboot_device(entry.device, false, 1);
+            reboot_cmd.execute_single(entry);
         }
     }
 
