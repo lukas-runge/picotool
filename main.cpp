@@ -2388,6 +2388,9 @@ void enumerate_devices(vector<device_entry>& device_entries, libusb_context* ctx
             } catch (picoboot::connection_error&) {
                 // FIXME: report failure
                 continue;
+            } catch (picoboot::command_failure&) {
+                // FIXME: report failure
+                continue;
             }
         }
 
