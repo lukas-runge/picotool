@@ -1650,7 +1650,7 @@ string missing_device_string(bool wasRetry) {
     return b;
 }
 
-string get_flash_uuid(libusb_device_handle* handle) {
+string device_get_unique_id(libusb_device_handle* handle) {
     picoboot::connection con = picoboot::connection(handle, true);
     picoboot_memory_access raw_access(con);
 
@@ -1786,7 +1786,7 @@ void print_hex(uint8_t * buf, size_t len) {
 }
 
 bool serial_command::execute_single(device_entry& device) {
-    string serial = get_flash_uuid(device.handle);
+    string serial = device_get_unique_id(device.handle);
     std::cout << serial << "\n";
     return false;
 }
@@ -2384,7 +2384,7 @@ void enumerate_devices(vector<device_entry>& device_entries, libusb_context* ctx
             // read its serial number from flash
 
             try {
-                serial = get_flash_uuid(handle);
+                serial = device_get_unique_id(handle);
             } catch (picoboot::connection_error&) {
                 // FIXME: report failure
                 continue;
