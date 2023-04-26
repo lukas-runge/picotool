@@ -36,7 +36,8 @@ namespace picoboot {
             if (exclusive) {
                 if (picoboot_exclusive_access(device, NOT_EXCLUSIVE)) {
                     // failed to restore exclusive access, so just reset
-                    reset();
+                    // don't use the wrapper, to avoid C++ calling std::terminate on exceptions
+                    picoboot_reset(device);
                 }
             }
         }
