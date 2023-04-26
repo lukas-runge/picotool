@@ -2383,7 +2383,12 @@ void enumerate_devices(vector<device_entry>& device_entries, libusb_context* ctx
             // device is in BOOTSEL mode
             // read its serial number from flash
 
-            serial = get_flash_uuid(handle);
+            try {
+                serial = get_flash_uuid(handle);
+            } catch (picoboot::connection_error&) {
+                // FIXME: report failure
+                continue;
+            }
         }
 
         if (!settings.serial.empty() && serial != settings.serial) continue;
