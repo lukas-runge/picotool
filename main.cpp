@@ -2527,7 +2527,8 @@ int main(int argc, char **argv) {
                 fail(ERROR_NO_DEVICE, "no device after force reboot");
             } else if (dev_support == cmd::one && !settings.multiple && num_devices > 1) {
                 // TODO: better error message
-                fail(ERROR_NOT_POSSIBLE, "too many devices after force reboot");
+                // fail(ERROR_NOT_POSSIBLE, "too many devices after force reboot");
+                std::cout << "WARNING: too many devices after force reboot\n";
             }
         }
 
